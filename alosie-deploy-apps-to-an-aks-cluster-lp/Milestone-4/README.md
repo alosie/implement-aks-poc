@@ -67,3 +67,6 @@ Once your code is checked into GitHub, in ADO Pipelines, create a new pipeline a
 To test the `push` pipeline, create a feature branch and make a change in the `helm-app` directory. Publish the branch to GitHub and that should kick off the pipeline.
 
 The `pr` pipeline will be triggered when a Pull Request is created to merge the feature branch into the default branch. The `merge` pipeline will be triggered when the merge is approved and completed. The `staging` pipeline will run when the `merge` pipeline completes. The `production` pipeline will run when the staging pipeline completes.
+
+
+check for updates 
