@@ -1,0 +1,36 @@
+# Azure DevOps pipeline for push on non-main branch
+
+# Reference variable group
+variables:
+- group: ado-variables
+
+# Ignore PR
+pr: none
+
+# Trigger on push for non-main branch in directory with Helm code files
+trigger:
+  branches:
+    exclude:
+    - main
+  paths:
+    include:
+    - helm-app/
+
+# Stage triggered by push
+stages:
+- stage: Push
+  condition: eq(variables['Build.Reason'], 'IndividualCI')
+  displayName: Helm Lint
+  jobs:
+  # Check format in first job
+  - job: helm_lint
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+        # Format check
+    - task: Bash@3
+      displayName: Check Formatting
+      inputs:
+        targetType: 'inline'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/helm-app/hello-world'
+        script: helm lint

@@ -1,0 +1,113 @@
+# Azure DevOps pipeline for production deployment after published chart
+
+# Reference variable group
+variables:
+- group: ado-variables
+- name: kubeloginVersion
+  value: 'v0.0.10'
+
+# No CI trigger
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+  - pipeline: stagingdeploy
+    source: 'Staging Deploy'
+    trigger:
+      branches:
+        include:
+        - main
+      stages:
+      - Staging
+
+stages:
+- stage: ValidateStaging
+  displayName: validate staging
+  jobs:
+  - job: waitForValidation
+    displayName: Wait for external validation
+    pool: server
+    timeoutInMinutes: 180 # job times out in 3 hours
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 180 # task times out in 3 hours
+      inputs:
+        notifyUsers: |
+          test@test.com
+          example@example.com
+        instructions: 'Please validate the staging deployment and approve for production deploy'
+        
+# production stage to deploy new helm chart
+- stage: Production
+  displayName: Helm Deploy to production
+  jobs:
+  - job: deploy_helm_chart
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - script: |
+          echo $(resources.pipeline.stagingdeploy.pipelineID)
+          echo $(resources.pipeline.stagingdeploy.runName)
+          echo $(resources.pipeline.stagingdeploy.runID)
+          echo $(resources.pipeline.stagingdeploy.runURI)
+          echo $(resources.pipeline.stagingdeploy.sourceBranch)
+          echo $(resources.pipeline.stagingdeploy.sourceCommit)
+          echo $(resources.pipeline.stagingdeploy.sourceProvider)
+          echo $(resources.pipeline.stagingdeploy.requestedFor)
+          echo $(resources.pipeline.stagingdeploy.requestedForID)
+      # Use kubelogin to log into the cluster with SP
+      - bash: |
+
+          # Download and install
+          curl -LO "https://github.com/Azure/kubelogin/releases/download/$(kubeloginVersion)/kubelogin-linux-amd64.zip"
+          sudo unzip -j "kubelogin-linux-amd64.zip" -d /usr/local/bin
+          rm -f "kubelogin-linux-amd64.zip"
+          kubelogin --version
+        displayName: kubelogin - install
+
+      - bash: |
+          # Log in using stored SP
+          az login \
+            --service-principal \
+            --username $(aad_sp_client_id) \
+            --password $(aad_sp_client_secret) \
+            --tenant $(aad_tenant_id)
+
+          # Create the kubeconfig file with name of AKS cluster
+          touch .kubeconfig-$(kubernetesCluster)
+          chmod 600 .kubeconfig-$(kubernetesCluster)
+
+          # Get credentials using AAD non-interactive login
+          az aks get-credentials \
+            --resource-group $(azureResourceGroup) \
+            --name $(kubernetesCluster) \
+            --overwrite-existing \
+            --file .kubeconfig-$(kubernetesCluster)
+
+          # Convert the credentials using the azure cli option
+          kubelogin convert-kubeconfig -l azurecli
+        displayName: create kubelogin file with azurecli
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      # Deploy to AKS cluster in production namespace
+      # Create the namespace if it doesn't exist
+      - bash: |
+          kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+        displayName: kubectl - create namespace
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      # Upgrade the helm deploy
+      - bash: |
+
+          helm registry login $(acr_login_server) \
+          --username $(aad_sp_client_id) \
+          --password $(aad_sp_client_secret)
+
+          helm upgrade --install --namespace production hello-world oci://$(acr_login_server)/charts/hello-world/hello-world --version $(resources.pipeline.stagingdeploy.runName)
+        displayName: Helm upgrade
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+          HELM_EXPERIMENTAL_OCI: 1

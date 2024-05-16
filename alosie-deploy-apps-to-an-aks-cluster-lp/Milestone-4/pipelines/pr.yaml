@@ -1,0 +1,80 @@
+# Azure DevOps pipeline for pull request to main branch
+
+# Reference variable group
+variables:
+- group: ado-variables
+- name: kubeloginVersion
+  value: 'v0.0.10'
+
+# No CI trigger
+trigger: none
+
+# Trigger on a PR action from GitHub on the main branch (merging to main)
+# Inlcudes only the AKS config code
+pr:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - helm-app/
+
+stages:
+# Stage that includes the build reason PullRequest
+- stage: PullRequest
+  condition: eq(variables['Build.Reason'], 'PullRequest')
+  displayName: Helm Deploy to development
+  jobs:
+  - job: deploy_helm_chart
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      # Use kubelogin to log into the cluster with SP
+      - bash: |
+
+          # Download and install
+          curl -LO "https://github.com/Azure/kubelogin/releases/download/$(kubeloginVersion)/kubelogin-linux-amd64.zip"
+          sudo unzip -j "kubelogin-linux-amd64.zip" -d /usr/local/bin
+          rm -f "kubelogin-linux-amd64.zip"
+          kubelogin --version
+        displayName: kubelogin - install
+
+      - bash: |
+          # Log in using stored SP
+          az login \
+            --service-principal \
+            --username $(aad_sp_client_id) \
+            --password $(aad_sp_client_secret) \
+            --tenant $(aad_tenant_id)
+
+          # Create the kubeconfig file with name of AKS cluster
+          touch .kubeconfig-$(kubernetesCluster)
+          chmod 600 .kubeconfig-$(kubernetesCluster)
+
+          # Get credentials using AAD non-interactive login
+          az aks get-credentials \
+            --resource-group $(azureResourceGroup) \
+            --name $(kubernetesCluster) \
+            --overwrite-existing \
+            --file .kubeconfig-$(kubernetesCluster)
+
+          # Convert the credentials using the azure cli option
+          kubelogin convert-kubeconfig -l azurecli
+        displayName: create kubelogin file with azurecli
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      # Deploy to AKS cluster in development namespace
+      # First clean up any existing deployments
+      - bash: |
+          kubectl delete namespace development --ignore-not-found
+          kubectl create namespace development
+        displayName: kubectl - delete and create namespace
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      - bash: |
+          helm install --namespace development hello-world '$(System.DefaultWorkingDirectory)/helm-app/hello-world'
+        displayName: Helm install
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)

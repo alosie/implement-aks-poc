@@ -1,0 +1,43 @@
+# Azure DevOps pipeline for push on non-main branch
+
+# Reference variable group
+variables:
+- group: ado-variables
+
+# Do not trigger on pr
+pr: none
+
+# Trigger on push for main branch in directory with Helm code files
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - helm-app/
+
+# Stage triggered by push
+stages:
+- stage: Push
+  condition: eq(variables['Build.Reason'], 'IndividualCI')
+  displayName: helm - publish chart
+  jobs:
+  # Job to save Helm chart to ACR
+  - job: save_helm_chart
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    # Helm deploy to save chart
+    - bash: |
+        helm version
+
+        helm registry login $(acr_login_server) \
+          --username $(aad_sp_client_id) \
+          --password $(aad_sp_client_secret)
+
+        helm package '$(System.DefaultWorkingDirectory)/helm-app/hello-world' --version $(Build.BuildNumber)
+
+        helm push '$(System.DefaultWorkingDirectory)/hello-world-$(Build.BuildNumber).tgz' oci://$(acr_login_server)/charts/hello-world
+      displayName: 'helm - save and push'
+      env:
+        HELM_EXPERIMENTAL_OCI: 1

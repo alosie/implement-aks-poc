@@ -1,0 +1,97 @@
+# Azure DevOps pipeline for staging deployment after published chart
+
+# Reference variable group
+variables:
+- group: ado-variables
+- name: kubeloginVersion
+  value: 'v0.0.10'
+
+# No CI trigger
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+  - pipeline: mergetomain
+    source: 'Main Merge'
+    trigger:
+      branches:
+        include:
+        - main
+      stages:
+      - Push
+
+stages:
+# Staging stage to deploy new helm chart
+- stage: Staging
+  displayName: Helm Deploy to staging
+  jobs:
+  - job: deploy_helm_chart
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - script: |
+          echo $(resources.pipeline.mergetomain.pipelineID)
+          echo $(resources.pipeline.mergetomain.runName)
+          echo $(resources.pipeline.mergetomain.runID)
+          echo $(resources.pipeline.mergetomain.runURI)
+          echo $(resources.pipeline.mergetomain.sourceBranch)
+          echo $(resources.pipeline.mergetomain.sourceCommit)
+          echo $(resources.pipeline.mergetomain.sourceProvider)
+          echo $(resources.pipeline.mergetomain.requestedFor)
+          echo $(resources.pipeline.mergetomain.requestedForID)
+      # Use kubelogin to log into the cluster with SP
+      - bash: |
+
+          # Download and install
+          curl -LO "https://github.com/Azure/kubelogin/releases/download/$(kubeloginVersion)/kubelogin-linux-amd64.zip"
+          sudo unzip -j "kubelogin-linux-amd64.zip" -d /usr/local/bin
+          rm -f "kubelogin-linux-amd64.zip"
+          kubelogin --version
+        displayName: kubelogin - install
+
+      - bash: |
+          # Log in using stored SP
+          az login \
+            --service-principal \
+            --username $(aad_sp_client_id) \
+            --password $(aad_sp_client_secret) \
+            --tenant $(aad_tenant_id)
+
+          # Create the kubeconfig file with name of AKS cluster
+          touch .kubeconfig-$(kubernetesCluster)
+          chmod 600 .kubeconfig-$(kubernetesCluster)
+
+          # Get credentials using AAD non-interactive login
+          az aks get-credentials \
+            --resource-group $(azureResourceGroup) \
+            --name $(kubernetesCluster) \
+            --overwrite-existing \
+            --file .kubeconfig-$(kubernetesCluster)
+
+          # Convert the credentials using the azure cli option
+          kubelogin convert-kubeconfig -l azurecli
+        displayName: create kubelogin file with azurecli
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      # Deploy to AKS cluster in staging namespace
+      # Create the namespace if it doesn't exist
+      - bash: |
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+        displayName: kubectl - create namespace
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+
+      # Upgrade the helm deploy
+      - bash: |
+
+          helm registry login $(acr_login_server) \
+          --username $(aad_sp_client_id) \
+          --password $(aad_sp_client_secret)
+
+          helm upgrade --install --namespace staging hello-world oci://$(acr_login_server)/charts/hello-world/hello-world --version $(resources.pipeline.mergetomain.runName)
+        displayName: Helm upgrade
+        env:
+          KUBECONFIG: $(Build.SourcesDirectory)/.kubeconfig-$(kubernetesCluster)
+          HELM_EXPERIMENTAL_OCI: 1
